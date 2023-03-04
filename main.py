@@ -6,11 +6,15 @@ import random
 
 import data_manager
 import interaction_views
+import datetime
+
 
 intents = discord.Intents.default()
 intents.message_content = True
 
 bot = discord.Bot(intents=intents)
+
+last_remind_times = {}
 
 gifs = {}
 with open("gifs.json") as file:
@@ -19,6 +23,10 @@ with open("gifs.json") as file:
 lines = {}
 with open("lines.json") as file:
     lines = json.load(file)
+
+lines_gifless = {}
+with open("gifless_lines.json") as file:
+    lines_gifless = json.load(file)
 
 HELP_MESSAGE = """
 Gif commands:
@@ -43,7 +51,6 @@ Slash commands:
 ```
 """
 
-
 def __find_mariage_for_member_id(member_id: int) -> list[int]:
     data = data_manager.get_data()
     if "marriages" not in data:
@@ -57,6 +64,14 @@ def __find_mariage_for_member_id(member_id: int) -> list[int]:
             return marriage
 
     return []
+
+def check_bedtime_data():
+    data = data_manager.get_data()
+    if "bedtime" not in data:
+        data["bedtime"] = {}
+        with data_manager.DataWriter() as writer:
+            writer.set_data(data)
+        return {}
 
 
 # Slash commands
@@ -273,6 +288,96 @@ async def gif_command_handler(message: discord.Message, command: list[str]):
     choosen_line = choosen_line.replace("$2", target)
     await message.reply(f"{choosen_line}\n{choosen_gif}")
 
+
+bedtime = discord.SlashCommandGroup("bedtime", "Bedtime reminders")
+
+@bedtime.command()
+async def view(context: discord.ApplicationContext):
+    data = data_manager.get_data()
+    message_author = context.author
+    check_bedtime_data()
+    
+    # Exit out early if the user doesn't have a bedtime set.
+    if data["bedtime"][message_author.id] == {}:
+        await context.respond("You currently do not have a bedtime set. You can set yourself one with /bedtime subscribe.", ephemeral = True)
+    else:
+        bedtime = data["bedtime"][message_author.id]["bedtime"]
+        waketime = data["bedtime"][message_author.id]["waketime"]
+        await context.respond(f"Your bedtime is currently at {bedtime}, and your waketime is at {waketime}.",  ephemeral = True);
+
+
+@bedtime.command()
+async def unsubscribe(context: discord.ApplicationContext):
+    data = data_manager.get_data()
+    message_author = context.author
+    
+    if data["bedtime"][message_author.id]["active"] == True:
+        data["bedtime"][message_author.id]["active"] = False
+        
+        with data_manager.DataWriter() as writer:
+            writer.set_data(data)
+            
+        await context.respond("Unsubscribe successful",  ephemeral = True)
+        return
+
+        
+@bedtime.command()        
+async def subscribe(context: discord.ApplicationContext, hour_sleeptime: int, hour_waketime: int):
+    message_author = context.author
+    data = data_manager.get_data()
+    
+    if data["bedtime"][message_author.id] == {}:
+        # Add reminder
+        last_remind_times[message_author.id] = datetime.datetime.now(datetime.timezone.utc).minute
+        # Add bedtime and waketime to the database
+        data["bedtime"][message_author.id] = {
+            "bedtime": hour_sleeptime,
+            "waketime": hour_waketime,
+            "active": "True",
+        }
+    else:
+        data["bedtime"][message_author.id]["bedtime"] = hour_sleeptime
+        data["bedtime"][message_author.id]["waketime"] = hour_waketime
+        
+    
+    with data_manager.DataWriter() as writer:
+        writer.set_data(data)
+        await context.respond(
+            f"{message_author} set their bedtime to {hour_sleeptime} and waketime to {hour_waketime}.",  ephemeral = True
+            )
+        return
+        
+bot.add_application_command(bedtime)
+
+                
+def time_in_range(start, end, x):
+    if start <= end:
+        return start <= x <= end
+    else:
+        return start <= x or x <= end
+
+        
+async def bedtime_reminder(message: discord.Message):
+    # Get current UTC time
+    current_time = datetime.datetime.now(datetime.timezone.utc)
+    data = data_manager.get_data()
+    if data["bedtime"][message_author.id] is not {} and data["bedtime"][message.author.id]["active"] == True:
+        if message.author.id not in last_remind_times:
+            # ID is not in the variable. Bot was probably rebooted, so let's put them back in there.
+            last_remind_times[message.author.id] = current_time.minute
+            return
+            
+        # Check if it's been more than five minutes, or it's negative (probably because the hour changed)
+        if not (last_remind_times[message.author.id] - current_time.minute) >= 5 or (last_remind_times[message.author.id] - current_time.minute) <= -1 and time_in_range(data["bedtime"][message_author.id]["bedtime"], data["bedtime"][message_author.id]["waketime"], current_time.hour) == True:
+            return
+        choosen_line = random.choice(lines_gifless["bedtime"])
+        choosen_line = choosen_line.replace("$1", message.author.name)
+        # Send a message
+        await message.reply(choosen_line) 
+        last_remind_times[message.author.id] = current_time.minute
+        return
+         
+        
 GIF_COMMANDS = [
     "hug",
     "kiss",
@@ -300,6 +405,7 @@ async def on_message(message: discord.Message):
     command = message_as_command[0]
     if command in GIF_COMMANDS:
         await gif_command_handler(message, message_as_command)
+    await bedtime_reminder(message)
 
-
+check_bedtime_data()
 bot.run(open("token").read())
